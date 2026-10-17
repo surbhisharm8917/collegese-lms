@@ -1,0 +1,38 @@
+{
+  "name": "just-easy-ca-classes-lms",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Just Easy CA Classes learning platform",
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "clean:dry": "node scripts/clean.mjs --dry-run",
+    "dev": "concurrently -n backend,frontend -c blue,green \"pnpm --dir backend dev\" \"pnpm --dir frontend dev\"",
+    "dev:backend": "pnpm --dir backend dev",
+    "dev:frontend": "pnpm --dir frontend dev",
+    "install:all": "pnpm --dir backend install && pnpm --dir frontend install",
+    "build": "pnpm --dir backend build && pnpm --dir frontend build",
+    "build:backend": "pnpm --dir backend build",
+    "build:frontend": "pnpm --dir frontend build",
+    "db:push": "pnpm --dir backend db:push",
+    "db:generate": "pnpm --dir backend db:generate",
+    "lint": "pnpm --dir backend lint && pnpm --dir frontend lint",
+    "lint:fix": "pnpm --dir backend lint:fix && pnpm --dir frontend lint:fix",
+    "format": "pnpm --dir backend format && pnpm --dir frontend format",
+    "format:check": "pnpm --dir backend format:check && pnpm --dir frontend format:check",
+    "typecheck": "pnpm --dir backend typecheck && pnpm --dir frontend typecheck",
+    "test": "pnpm --dir backend test",
+    "infra:local:up": "docker compose -f compose.local.yml up -d redis livekit",
+    "infra:local:down": "docker compose -f compose.local.yml down",
+    "infra:local:logs": "docker compose -f compose.local.yml logs -f livekit redis",
+    "infra:validate": "terraform -chdir=infra/terraform/azure init -backend=false -input=false && terraform -chdir=infra/terraform/azure fmt -check -recursive && terraform -chdir=infra/terraform/azure validate && terraform -chdir=infra/terraform/aws init -backend=false -input=false && terraform -chdir=infra/terraform/aws fmt -check -recursive && terraform -chdir=infra/terraform/aws validate",
+    "smoke": "node scripts/smoke-test.mjs",
+    "setup": "node scripts/setup.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  }
+}

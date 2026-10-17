@@ -1,0 +1,103 @@
+# ═══════════════════════════════════════════════════════════
+# Dependencies
+# ═══════════════════════════════════════════════════════════
+node_modules/
+.pnpm-store/
+package-lock.json
+yarn.lock
+
+# ═══════════════════════════════════════════════════════════
+# Environment files (NEVER commit secrets)
+# ═══════════════════════════════════════════════════════════
+.env
+.env.local
+.env.production
+.env.staging
+.env.*.local
+!.env.example
+
+# ═══════════════════════════════════════════════════════════
+# Build outputs
+# ═══════════════════════════════════════════════════════════
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# ═══════════════════════════════════════════════════════════
+# IDE & editor
+# ═══════════════════════════════════════════════════════════
+.idea/
+*.swp
+*.swo
+*~
+
+# ═══════════════════════════════════════════════════════════
+# VS Code — commit settings, ignore personal overrides
+# ═══════════════════════════════════════════════════════════
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# ═══════════════════════════════════════════════════════════
+# Logs
+# ═══════════════════════════════════════════════════════════
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ═══════════════════════════════════════════════════════════
+# Testing & coverage
+# ═══════════════════════════════════════════════════════════
+coverage/
+.nyc_output/
+
+# ═══════════════════════════════════════════════════════════
+# OS files
+# ═══════════════════════════════════════════════════════════
+.DS_Store
+Thumbs.db
+._*
+.Spotlight-V100
+.Trashes
+
+# ═══════════════════════════════════════════════════════════
+# Prisma
+# ═══════════════════════════════════════════════════════════
+prisma/*.db
+generated/
+
+# ═══════════════════════════════════════════════════════════
+# Temporary files
+# ═══════════════════════════════════════════════════════════
+tmp/
+temp/
+*.tmp
+
+# ═══════════════════════════════════════════════════════════
+# Secrets / keys — NEVER commit these
+# ═══════════════════════════════════════════════════════════
+keys/
+certbot/
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+
+# Azure deploy working notes
+.azure-deploy.local.txt
+# Terraform working data and state contain provider caches and sensitive values.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

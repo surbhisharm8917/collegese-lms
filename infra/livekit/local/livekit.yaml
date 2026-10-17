@@ -1,0 +1,30 @@
+port: 7880
+
+redis:
+  address: redis:6379
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  node_ip: 127.0.0.1
+
+keys:
+  jeccdevkey: jecc-local-development-secret-2026-only
+
+room:
+  empty_timeout: 600
+  departure_timeout: 300
+  max_participants: 50
+
+webhook:
+  api_key: jeccdevkey
+  urls:
+    - http://host.docker.internal:4000/api/v1/live-lectures/webhook
+
+prometheus:
+  port: 6789
+
+logging:
+  level: info
+  json: true

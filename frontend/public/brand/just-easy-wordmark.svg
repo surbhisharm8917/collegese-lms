@@ -1,0 +1,20 @@
+<svg width="680" height="150" viewBox="0 0 680 150" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Just Easy CA Classes</title>
+  <desc id="desc">Navy and orange Just Easy CA Classes wordmark.</desc>
+  <g transform="translate(8 16)">
+    <rect width="106" height="106" rx="24" fill="#072A60"/>
+    <path d="M20 36C30 28 46 28 57 35C67 28 82 28 92 35V67C82 61 68 61 58 69C47 61 30 61 20 69V36Z" fill="white"/>
+    <path d="M20 65C31 58 46 58 57 66V73C46 66 31 66 20 73V65Z" fill="#FF5A00"/>
+    <path d="M40 26L58 17L77 26L58 35L40 26Z" fill="#072A60"/>
+    <path d="M74 27V46" stroke="#FF5A00" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="74" cy="47" r="4" fill="#FF5A00"/>
+  </g>
+  <g font-family="Poppins, Montserrat, Arial, sans-serif" font-weight="800">
+    <text x="140" y="62" font-size="32" letter-spacing="10" fill="#072A60">JUST</text>
+    <text x="138" y="112" font-size="62" letter-spacing="2" fill="#072A60">E</text>
+    <text x="184" y="112" font-size="62" letter-spacing="2" fill="#FF5A00">A</text>
+    <text x="238" y="112" font-size="62" letter-spacing="2" fill="#072A60">SY</text>
+    <text x="390" y="106" font-size="28" letter-spacing="12" fill="#072A60">CA CLASSES</text>
+  </g>
+  <path d="M390 122H640" stroke="#FF5A00" stroke-width="4" stroke-linecap="round"/>
+</svg>

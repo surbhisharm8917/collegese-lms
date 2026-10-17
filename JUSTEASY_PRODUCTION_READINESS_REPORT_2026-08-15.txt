@@ -1,0 +1,769 @@
+JUST EASY (www.justeasy.in)
+PRODUCTION READINESS, SECURITY AND 5,000-CONCURRENT-STUDENT REPORT
+
+Prepared: 15 August 2026
+Environment reviewed: Azure resource group rg-collegese-lms-prod-d8bfdf7c
+Classification: Internal planning and remediation report
+
+======================================================================
+1. EXECUTIVE DECISION
+======================================================================
+
+VERDICT: NOT READY for 5,000 concurrent students today.
+
+The application has a credible LMS foundation and several good security controls,
+but the deployed Azure environment is currently a single-instance setup with a
+small non-HA database. It has no proven 5,000-user capacity, no shared distributed
+rate limiter, no durable background queue, and no high-scale video delivery path.
+There are also correctness, secret-management, dependency and CORS issues that
+must be fixed before a production launch or large student event.
+
+Indicative readiness score: 43/100 (planning indicator, not a certification)
+
+  Application security controls         58/100
+  Reliability and disaster recovery     32/100
+  Scalability and performance           25/100
+  Data/platform architecture            35/100
+  Observability and operations          45/100
+  Product completeness                  56/100
+  CI/CD and engineering controls        66/100
+
+Positive conclusion: this does not require a complete rewrite. The existing
+React/Express/PostgreSQL architecture can evolve into a production platform if
+the P0/P1 remediation and load testing in this report are completed.
+
+IMPORTANT CAPACITY DISTINCTION
+
+"5,000 concurrent students" can mean:
+  A. 5,000 logged-in users browsing courses, watching CDN video and using APIs;
+  B. 5,000 students starting/submitting an exam together; or
+  C. 5,000 students in one interactive live video room.
+
+These are different engineering problems. A and B are achievable with the target
+architecture below. C should not use one ordinary WebRTC classroom: use a
+broadcast/streaming architecture for one-to-many events, or shard interactive
+classes into smaller rooms.
+
+======================================================================
+2. AUDIT SCOPE AND LIMITATIONS
+======================================================================
+
+Evidence reviewed:
+  - Live HTTPS response, TLS, security headers and public runtime configuration.
+  - Read-only Azure CLI inspection of Container Apps, PostgreSQL and Blob storage.
+  - Backend/frontend source, Prisma schema, migrations, Docker/Nginx, Terraform,
+    CI/CD workflows, deployment documentation and selected security-sensitive flows.
+  - Local TypeScript type checks, ESLint and current production dependency audits.
+
+Verified successfully:
+  - https://www.justeasy.in returns HTTP 200 with a trusted certificate.
+  - http://www.justeasy.in redirects to HTTPS.
+  - Apex and www custom-domain certificates are bound and healthy.
+  - Backend readiness currently reports database, Blob and LiveKit as available.
+  - Backend and frontend TypeScript checks pass.
+
+Not performed:
+  - No destructive penetration test, credential attack or data mutation.
+  - No authenticated browser journey, because no audit accounts were supplied.
+  - No 5,000-user load test or LiveKit media test.
+  - No malware upload, payment fraud or backup restore test.
+  - No full WCAG/mobile-device audit.
+  - Existing integration tests were not run from this workstation because local
+    environment files could point at production dependencies. Run them in isolated CI.
+
+Therefore, this report identifies evidence-based risks and required work. It does
+not certify that no other vulnerability exists.
+
+======================================================================
+3. CURRENT PRODUCTION STATE - VERIFIED
+======================================================================
+
+Public web:
+  - www.justeasy.in: healthy HTTP 200, Nginx, HTTPS/HSTS and core security headers.
+  - The site is a client-rendered SPA; public shell availability was verified.
+  - Runtime API points to the Azure Container App backend hostname.
+  - Legal address, grievance officer, CIN and GSTIN runtime fields are blank.
+
+Frontend Container App:
+  - 0.5 vCPU, 1 GiB RAM.
+  - min replicas 1, max replicas 1, no scale rule.
+  - Single point of service during restart/failure.
+
+Backend Container App:
+  - 2 vCPU, 4 GiB RAM.
+  - min replicas 1, max replicas 1, no scale rule.
+  - Exactly one ready replica at audit time.
+  - Production health identifies release as version "development", commit "local";
+    release traceability is not wired correctly.
+
+LiveKit Container App:
+  - 1 vCPU, 2 GiB RAM.
+  - min replicas 1, max replicas 1, no scale rule.
+  - Application configuration caps a room at 300 participants.
+  - This cannot meet a 5,000-participant single-live-room requirement.
+
+PostgreSQL Flexible Server:
+  - Standard_B1ms Burstable tier, 32 GiB storage, 120 IOPS.
+  - max_connections = 50.
+  - High availability disabled.
+  - Geo-redundant backup disabled.
+  - Automatic storage growth disabled.
+  - Backup retention only 7 days.
+  - Public network access enabled; firewall includes Azure-services access and one
+    client IP. This is materially weaker than the repository's private/HA design.
+
+Blob storage:
+  - Standard_LRS, one-region local redundancy.
+  - Public network access is used and public blob access is permitted at account
+    level. Private content may still be private by container policy, but the
+    account-level posture is broader than recommended.
+
+Configuration drift:
+  - Deployment documentation promises two or more app replicas, private HA
+    PostgreSQL, versioned storage and production secret references.
+  - Actual resources do not satisfy that contract. Treat this as infrastructure
+    drift and make Terraform the only production source of truth.
+
+======================================================================
+4. P0 BLOCKERS - FIX BEFORE LARGE PRODUCTION USE
+======================================================================
+
+P0-1. ROTATE AND CORRECTLY STORE THE DATABASE CREDENTIAL
+Severity: Critical
+
+The production DATABASE_URL is a plain Container App environment value, not a
+secret reference. Anyone with sufficient resource-read access can read the full
+credential. The report intentionally excludes its value.
+
+Required action:
+  1. Create a Key Vault secret or Container Apps secret reference.
+  2. Update the app to reference the secret, never a plain value.
+  3. Rotate the PostgreSQL password immediately after cutover.
+  4. Review Azure activity logs and role assignments.
+  5. Remove unnecessary broad read permissions.
+Acceptance: resource JSON shows only secretRef; old credential no longer works.
+
+P0-2. FIX WWW API AND UPLOAD CORS
+Severity: Critical functional blocker
+
+The backend allowlist contains the apex domain and provider hostname but not
+https://www.justeasy.in. A live preflight from www returned no
+Access-Control-Allow-Origin. The web shell loads, but browser API calls can fail.
+Blob direct-upload CORS must also include the canonical frontend origin.
+
+Required action:
+  - Choose one canonical URL, preferably https://justeasy.in.
+  - Either redirect www to apex, or add www to backend and Blob CORS.
+  - If both remain live, set canonical tags and test cookie/CSRF behavior on both.
+Acceptance: login, course APIs and direct uploads pass in a real browser from www.
+
+P0-3. REMOVE SINGLE-INSTANCE FAILURE MODES
+Severity: Critical availability/capacity blocker
+
+All apps have maxReplicas=1. One restart or unhealthy instance removes service.
+Required action:
+  - Backend: min 3 replicas across zones where supported; autoscale from tested
+    concurrency/CPU/latency signals, not guessed values.
+  - Frontend: min 2, or move static assets to Blob/static hosting plus CDN.
+  - Live: use managed/dedicated LiveKit capacity, not one small general container.
+Acceptance: kill-one-replica test causes no user-visible outage.
+
+P0-4. UPGRADE AND ISOLATE POSTGRESQL
+Severity: Critical data and capacity blocker
+
+B1ms/120 IOPS/50 connections/no HA/no autogrow is not a 5,000-user production DB.
+Required action:
+  - Private networking only; remove public DB access.
+  - General Purpose or Memory Optimized production SKU, initially 4-8 vCores,
+    then tune from measured load.
+  - Zone-redundant HA, autogrow, 14-35 day PITR retention and geo-DR decision.
+  - PgBouncer/connection pooling; enforce a per-replica Prisma connection budget.
+  - Alert on CPU, memory, IOPS, storage, connections, deadlocks and slow queries.
+Acceptance: failover and restore drills meet documented RPO/RTO.
+
+P0-5. ENFORCE QUIZ DEADLINES ON THE SERVER
+Severity: High integrity loophole
+
+Quiz question retrieval calculates time remaining, but quiz submission accepts an
+IN_PROGRESS attempt without checking start time + time limit or due date. A learner
+can retain an attempt and submit late. Exam submission correctly has server-side
+deadline enforcement, so quiz behavior is inconsistent.
+
+Evidence: backend/src/controllers/quiz/quiz.controller.ts around lines 499-659.
+Required action: perform atomic deadline/status validation at submission; expire or
+auto-submit server-side; add concurrent/delayed submission integration tests.
+
+P0-6. PATCH CURRENT HIGH-SEVERITY DEPENDENCIES
+Severity: High
+
+Current pnpm production audits found:
+  - ip-address <=10.3.0 through express-rate-limit: GHSA-mwp4-54f8-5fhr.
+  - fast-xml-parser 5.9.3-5.10.0 through Azure SDK: GHSA-8r6m-32jq-jx6q.
+  - react-router 7.12.0-7.18.1: GHSA-qwww-vcr4-c8h2.
+
+Required action: update lockfiles to patched transitive versions, rebuild, run tests,
+scan images and redeploy immutable images. Do not suppress these advisories without
+a documented exploitability assessment.
+
+P0-7. ADD EDGE WAF, BOT AND DDOS CONTROLS
+Severity: High
+
+The public Container App API has no verified Azure Front Door WAF policy. Local
+rate limiting is not enough for credential stuffing, Layer-7 attacks or bots.
+Required action: Azure Front Door Premium or equivalent, managed WAF rules,
+rate/bot policies, origin restriction, DDoS posture and tested emergency blocks.
+
+P0-8. PROVE BACKUP RESTORE, NOT JUST BACKUP CREATION
+Severity: High
+
+A backup is useful only if it restores. Perform automated monthly restore drills to
+an isolated environment, application integrity checks and recorded RPO/RTO.
+Target planning objective: RPO <=15 minutes and RTO <=60 minutes, finalized by
+business impact analysis.
+
+======================================================================
+5. HIGH-PRIORITY APPLICATION AND ARCHITECTURE GAPS
+======================================================================
+
+5.1 Replica-local rate limiting
+
+express-rate-limit uses the process memory store. Every scaled replica gets an
+independent counter, allowing bypass and inconsistent lockouts.
+Evidence: backend/src/middlewares/security.middleware.ts lines 10-71.
+Fix: Redis-backed distributed limiter, account-aware login controls, device/IP risk
+signals, progressive delays, CAPTCHA only after risk thresholds, and WAF limits.
+
+5.2 Unbounded database queries and in-process analytics
+
+Multiple admin/reporting paths use findMany without cursor pagination. The
+certificate progress report loads enrollments and all progress/submissions, then
+repeatedly scans arrays, creating high memory and CPU growth.
+Evidence includes certificate.controller.ts around lines 438-526 and unbounded
+exam, live lecture, payment, certificate and analytics list endpoints.
+Fix: mandatory cursor pagination, filtered projections, SQL aggregation/materialized
+views, export jobs and query budgets. Reject page sizes above a safe limit.
+
+5.3 Missing durable work queue
+
+Large student email/notification fan-out occurs inside the web process with
+Promise.allSettled. Restarts lose work; thousands of emails create bursts.
+Evidence: liveLecture.controller.ts around lines 175-195 and similar exam/
+assessment publication flows.
+Fix: Azure Service Bus queues, worker Container Apps Jobs, idempotency keys,
+retry with exponential backoff, dead-letter queues, dashboards and replay tools.
+
+5.4 Video delivery is not a high-scale media pipeline
+
+Recorded videos are private objects served by signed URLs. There is no verified
+adaptive HLS/DASH packaging, ABR renditions, DRM, watermarking, malware scanning,
+quarantine or private CDN token enforcement.
+Fix: direct quarantine upload -> AV/content validation -> asynchronous transcode ->
+multiple HLS renditions -> private CDN signed playback -> playback telemetry.
+Never stream 5,000 videos through Node.js or one Container App.
+
+5.5 Client-asserted lecture completion
+
+A student can send progress=100; the server marks completion at >=90. That can feed
+course completion and certificate eligibility.
+Evidence: recordedLecture.controller.ts around lines 460-510; certificate checks
+around lines 29-59.
+Fix: server-issued playback sessions, monotonic heartbeat telemetry, minimum watch
+time, seek-aware policy and auditable completion events. Avoid intrusive tracking;
+collect only necessary learning telemetry with retention limits.
+
+5.6 Synchronous CPU-heavy work
+
+Certificate PDF/QR generation and some exports occur in API requests. At volume this
+increases p99 latency and memory pressure. Certificate issuance also has a race
+between pre-check and create because active uniqueness is not DB-enforced.
+Fix: queue generation; idempotency key; enforce one active certificate per
+user/course in a transaction or suitable partial unique index.
+
+5.7 Database indexes and connection design need load-driven tuning
+
+Add/verify compound indexes for common course/status/time and attempt/submission
+queries, including live lectures, participants, quizzes/questions/responses,
+exams/questions and reporting filters. Use EXPLAIN ANALYZE on representative data.
+Do not add indexes blindly: measure write and storage costs.
+
+5.8 Readiness is coupled to optional LiveKit
+
+/health/ready requires DB, storage and LiveKit. A LiveKit outage can make every API
+replica unready and take down login/catalogue/exams.
+Evidence: backend/src/controllers/health.controller.ts lines 24-58.
+Fix: readiness should cover dependencies required for core API safety. Report
+LiveKit as degraded separately and disable only live-class functions.
+
+5.9 Payment workflow is not production commerce
+
+Current flow is manual screenshot approval. Approval uses a sound serializable
+transaction, but there is no gateway order, signed webhook, reconciliation,
+idempotent payment event, GST invoice, refund lifecycle, coupon/subscription or
+fraud tooling. Concurrent pending requests are not strongly prevented by schema.
+Fix: integrate an RBI-compliant provider such as Razorpay/Stripe India as chosen by
+legal/finance; verify signatures; store immutable payment events; reconcile daily;
+support refund/invoice/audit workflows. Do not store card data.
+
+5.10 Upload safety is incomplete
+
+Ownership receipts, size/content-type checks and private storage are positives.
+However, declared MIME/metadata is not enough. Add magic-byte validation,
+antivirus scanning, quarantine, decompression-bomb protection, filename stripping,
+content moderation and asynchronous promotion to clean storage.
+
+5.11 Release and graceful-shutdown gaps
+
+Every backend replica runs migrations at startup, which can contend during scale-out.
+Image rollback cannot reverse a forward-only incompatible schema. Shutdown lacks a
+hard timeout, and unhandled rejection only logs.
+Fix: singleton migration/release job; expand-migrate-contract database changes;
+startup compatibility checks; shutdown timeout; drain queue/HTTP work; terminate on
+unrecoverable promise rejection so the platform can replace the process.
+
+5.12 Frontend quality/observability gaps
+
+There is no frontend test script. Browser errors go mainly to console; no verified
+RUM, Web Vitals, session-safe error tracking or source-map release correlation.
+Raw Axios usage relies on global interceptors and does not consistently define
+timeouts/retry rules. Current lint reports React effect/component/ref performance
+warnings that should be resolved before scale work.
+
+Validation result at audit time:
+  - Backend typecheck: PASS.
+  - Frontend typecheck: PASS.
+  - Backend lint: 0 errors, 143 warnings.
+  - Frontend lint: 0 errors, 124 warnings.
+  - Backend dependency audit: FAIL, 2 high and 2 moderate vulnerabilities.
+  - Frontend dependency audit: FAIL, 1 high vulnerability.
+  - Backend has unit/integration security tests; frontend has no test command.
+
+======================================================================
+6. VERIFIED SECURITY STRENGTHS
+======================================================================
+
+The following should be preserved during remediation:
+  - HTTP-only cookie authentication with database-backed sessions.
+  - JWT algorithm pinning and role/status reloading in auth middleware.
+  - Signed CSRF design, strict origin allowlist and bounded proxy trust.
+  - Central course/quiz/exam/assessment authorization helpers.
+  - Sampled exam attempts and recordings check owner or scoped staff access.
+  - Helmet/CSP/HSTS, request IDs and a global error handler.
+  - Signed LiveKit webhooks with database idempotency.
+  - Private upload receipts tied to owner, purpose, type and size.
+  - Exam deadline enforcement and certificate revocation/public verification.
+  - CI includes typecheck, lint, backend tests, dependency audit, image scanning,
+    secret scanning, Terraform validation and immutable image tags.
+
+No verified critical authentication bypass or sampled IDOR was found. This is not a
+claim that all routes are safe; complete role/object authorization matrix testing is
+still required.
+
+======================================================================
+7. TARGET AZURE ARCHITECTURE FOR 5,000 CONCURRENT STUDENTS
+======================================================================
+
+Recommended logical flow:
+
+  Users
+    -> Azure Front Door Premium + WAF + DDoS/bot/rate policies
+       -> Static frontend via CDN/Blob or 2+ frontend replicas
+       -> API origin (private/restricted Container Apps ingress)
+          -> 3+ stateless API replicas, autoscale after load tests
+          -> Redis: distributed limits, hot cache, short-lived coordination
+          -> Service Bus: email, notifications, exports, certificates, transcodes
+          -> Worker Container Apps/Jobs with retries and dead-letter queues
+          -> PostgreSQL private HA + PgBouncer + read/reporting strategy
+          -> Private Blob storage
+             -> quarantine -> scan/transcode workers -> private HLS CDN
+          -> Application Insights/OpenTelemetry + Log Analytics + alerts
+       -> Live platform
+          -> interactive LiveKit rooms sized/sharded by tested capacity
+          -> broadcast/LL-HLS path for very large one-to-many classes
+
+Initial sizing envelope for performance testing, NOT a guaranteed final size:
+
+API:
+  - 3 minimum replicas, 2 vCPU/4 GiB each.
+  - Autoscale up to 20-30 only after DB connection budgets and tests are ready.
+  - Start with 50-100 in-flight requests per replica, then tune by p95/p99,
+    event-loop lag, CPU, memory and DB saturation.
+
+Database:
+  - PostgreSQL General Purpose, 4-8 vCores as a starting test tier.
+  - Zone-redundant HA, 100+ GiB with autogrow and measured IOPS.
+  - Pool connections so total worst-case replica connections stay below safe DB
+    capacity with reserve for migrations, workers and operations.
+  - Read replicas/materialized views only if measured analytics load requires them.
+
+Cache/queue:
+  - Managed Redis with HA suitable for rate limiting/cache; do not make correctness
+    depend on non-durable cache data.
+  - Service Bus Standard/Premium based on throughput/isolation tests.
+
+Media:
+  - CDN egress capacity and origin shielding must be sized by bitrate, not user count.
+  - Example: 5,000 viewers x average 1.5 Mbps is about 7.5 Gbps playback egress;
+    this belongs on a CDN, not API compute.
+
+Live:
+  - Interactive classroom target: generally <=200-300 participants per room unless
+    the selected LiveKit service and test prove more.
+  - 5,000-viewer event: one/few publishers, broadcast distribution, moderated
+    questions/polls outside the media fan-out path.
+
+======================================================================
+8. CAPACITY TEST PLAN AND RELEASE GATES
+======================================================================
+
+Build a production-like staging environment with anonymized synthetic data. Use k6,
+Locust or equivalent. No 5,000-user claim is valid until these pass repeatedly.
+
+Workload A - steady learning day:
+  - Ramp to 5,000 authenticated sessions over 10 minutes.
+  - Catalogue/course metadata, progress heartbeats, notifications and CDN playback.
+  - Hold 60 minutes; inject one replica restart and one worker restart.
+
+Workload B - exam surge:
+  - 5,000 students open an exam in 2-5 minutes.
+  - Autosave at realistic intervals; all submit in a 60-second window.
+  - Verify exactly-once final state, deadline handling and no answer-key exposure.
+
+Workload C - login spike:
+  - 5,000 logins in 5 minutes, including invalid credentials and password reset.
+  - Validate distributed rate limits, no user enumeration and no email flood.
+
+Workload D - recorded video:
+  - 5,000 CDN playback sessions at multiple ABR renditions.
+  - Measure startup time, rebuffer ratio, origin offload and signed URL expiry.
+
+Workload E - live:
+  - Test selected room sizes, reconnect storms, teacher loss, webhook delay/replay,
+    recording/egress and regional network impairment.
+
+Minimum proposed go-live SLO gates:
+  - Monthly core-platform availability >=99.9%.
+  - API p95 <=300 ms for normal reads and <=800 ms for ordinary writes under target
+    load, excluding queued jobs and third-party payment/media latency.
+  - API p99 <=1.5 seconds for ordinary operations.
+  - Error rate <0.5%, with no lost/duplicate exam or payment finalization.
+  - Exam submission success >=99.95% under surge, with idempotent retry.
+  - Video startup p95 <3 seconds on supported Indian network profiles.
+  - Zero critical/high exploitable vulnerabilities at release.
+  - Successful HA failover and backup restore within approved RPO/RTO.
+  - Autoscaling stabilizes without exhausting DB connections.
+
+Security test gates:
+  - Full route-by-role/object matrix for IDOR and privilege escalation.
+  - CSRF/CORS/cookie/proxy-header tests for apex and www.
+  - SAST, dependency/container/IaC scan; independent penetration test.
+  - Upload polyglot/malware/oversize/archive tests.
+  - Payment webhook replay, forged signature and concurrent idempotency tests.
+  - Quiz/exam delayed, duplicate and simultaneous submission tests.
+
+Quality gates:
+  - Backend and frontend unit/integration/E2E suites.
+  - Playwright critical journeys: register, verify, login, purchase/enroll, watch,
+    live join, quiz, exam, assignment, certificate, admin operations and support.
+  - WCAG 2.2 AA audit; keyboard, focus, screen-reader, contrast and captions.
+  - Mobile Chrome/Safari and low-bandwidth/offline-resume testing.
+
+======================================================================
+9. PW-STYLE PRODUCT REQUIREMENTS GAP ANALYSIS
+======================================================================
+
+Already implemented or substantially present:
+  - Multi-role auth: student, teacher, assistant, admin and super admin.
+  - Courses, modules/chapters, enrollments and recorded lectures.
+  - LiveKit live classes and attendance events.
+  - Quizzes, exams, subjective grading and assessments/uploads.
+  - Certificates, revocation and public verification.
+  - Notifications/email, support tickets, basic analytics and exports.
+  - Maintenance mode, Docker, CI/CD and cloud IaC foundations.
+
+Priority product capabilities to reach a mature PW-like experience:
+
+A. Identity, onboarding and trust
+  - OTP/mobile login option, device/session management, account recovery and MFA for
+    admins/teachers.
+  - Batch/cohort/institute/center models and granular staff permissions.
+  - Guardian/parent linkage where required, consent and age-appropriate controls.
+  - Audit trail for every privileged action and data export.
+
+B. Course/content operations
+  - Draft-review-publish workflow, content versioning, scheduled release and rollback.
+  - Reusable course templates, batch mapping, prerequisite/drip rules and bundles.
+  - Full-text search, tags, notes, bookmarks, highlights, transcripts and captions.
+  - Multilingual UI/content, accessibility metadata and content quality workflow.
+
+C. Recorded learning
+  - HLS adaptive bitrate, CDN, captions, playback speed, resume and cross-device sync.
+  - Secure offline mobile downloads, configurable watermark/DRM and leak response.
+  - Trusted progress/watch analytics with transparent privacy controls.
+  - Video processing dashboard with failed-job retry and content moderation.
+
+D. Live classroom
+  - Timetable, recurring classes, reminders and calendar integration.
+  - Raise hand, moderated chat/Q&A, polls, reactions, whiteboard and teacher controls.
+  - Recording/egress, automatic publishing, captions and attendance reconciliation.
+  - Broadcast mode for thousands; fallback stream and incident communication.
+
+E. Assessments and learning integrity
+  - Question bank, topics/difficulty, randomization, sections, blueprints and versions.
+  - Autosave, idempotent submit, server timers and interruption recovery.
+  - Configurable evaluation rubrics, moderation/re-evaluation and result publication.
+  - Mock-test analytics: rank/percentile, topic weakness, time per question and trends.
+  - Proctoring only with explicit legal/privacy review; avoid invasive defaults.
+
+F. Commerce
+  - Gateway payments, signed webhooks, idempotency and reconciliation.
+  - Coupons, campaigns, bundles, installments/subscriptions where legally supported.
+  - GST invoices, refunds, cancellations, finance exports and chargeback workflow.
+  - Entitlement service separating payment state from course-access state.
+
+G. Engagement and support
+  - Doubt/Q&A workflow, faculty assignment, SLA and searchable solved doubts.
+  - Announcements and transactional email/SMS/push/WhatsApp via consented channels.
+  - Community/discussion moderation and abuse reporting.
+  - Help center, ticket SLA/escalation, service status and incident notices.
+
+H. Mobile and offline
+  - Native Android/iOS or strong PWA based on product strategy.
+  - Low-bandwidth UI, resumable uploads/downloads and offline notes/tests where safe.
+  - Push notifications, deep links, device compatibility and crash analytics.
+
+I. Analytics and outcomes
+  - Student learning dashboard, teacher cohort dashboard and intervention flags.
+  - Data warehouse/event model separate from transactional PostgreSQL.
+  - Funnel, retention, completion, learning-outcome and content-quality metrics.
+  - Export/privacy controls and metric definitions to prevent contradictory reports.
+
+J. Administration, compliance and operations
+  - Legal identity/config completion, privacy notice, terms versions and grievance SLA.
+  - Indian DPDP compliance program with legal counsel: purpose limitation, consent,
+    retention, access/correction/deletion handling and processor inventory.
+  - Backup/restore UI/runbook, incident management, status page and change approvals.
+  - Data retention, audit logs, admin MFA, least privilege and quarterly access review.
+
+Product recommendation: do not copy every PW feature. Prioritize the learner outcome,
+CA course workflow and scale-critical platform capabilities; defer social/gamified
+features until reliability, payments, video and assessment integrity are proven.
+
+======================================================================
+10. PHASED DELIVERY ROADMAP
+======================================================================
+
+PHASE 0 - Emergency production safety (0-7 days)
+  - Move DATABASE_URL to secret reference and rotate DB credential.
+  - Fix canonical domain plus backend/Blob CORS.
+  - Patch high dependency advisories and redeploy scanned images.
+  - Complete legal runtime configuration.
+  - Put basic WAF/front door in front of public origins.
+  - Enforce quiz deadline server-side.
+  - Freeze large marketing/launch events until Phase 1 capacity work passes.
+
+Exit: no known P0 secret/CORS/integrity blocker; clean high-severity scans.
+
+PHASE 1 - Reliable production baseline (weeks 2-4)
+  - Make Terraform authoritative; eliminate deployed drift.
+  - Private HA PostgreSQL, autogrow, longer backups, PgBouncer and alerts.
+  - 3+ backend replicas, tested autoscaling and graceful shutdown.
+  - Redis distributed rate limiting and Azure Service Bus/worker platform.
+  - Decouple LiveKit from core readiness.
+  - Pagination/query/index remediation for hot paths.
+  - Application Insights/OpenTelemetry, frontend RUM and release correlation.
+  - Restore, failover and incident-response drills.
+
+Exit: 1,000-user staging test, replica failure and restore drill pass.
+
+PHASE 2 - 5,000-user scale and core commerce/media (weeks 5-10)
+  - Adaptive video pipeline, private CDN and upload scanning/quarantine.
+  - Gateway payment/webhook/reconciliation/refund/invoice platform.
+  - Queue email, certificate, export, notification and transcode jobs.
+  - Idempotent exam/quiz autosave/submission and surge optimization.
+  - Production-grade LiveKit/broadcast decision and capacity contract.
+  - Execute all 5,000-user workload tests and tune DB/app/CDN.
+  - Independent penetration and accessibility audits.
+
+Exit: all Section 8 SLO/security/recovery gates pass twice on release candidate.
+
+PHASE 3 - PW-style learning depth (weeks 8-16+, parallel after platform stability)
+  - Question bank, mock analytics, batches/timetable and doubt-solving.
+  - Live engagement, recordings/captions and learning interventions.
+  - Mobile/PWA/offline strategy, multilingual and accessibility completion.
+  - Data warehouse, product analytics and finance/admin automation.
+
+Exit: product acceptance criteria, support operations and analytics definitions pass.
+
+Indicative team for an aggressive but controlled delivery:
+  - 1 technical lead/architect.
+  - 2 backend/platform engineers.
+  - 2 frontend/mobile engineers.
+  - 1 DevOps/SRE engineer.
+  - 1 QA automation/performance engineer.
+  - Shared product/design, security reviewer and legal/compliance advisor.
+
+These are planning estimates, not commitments. Final schedule depends on payment,
+LiveKit/video vendors, content migration, mobile scope and remediation discovered by
+load/penetration testing.
+
+======================================================================
+11. PRIORITIZED ENGINEERING BACKLOG WITH ACCEPTANCE CRITERIA
+======================================================================
+
+1. Secret migration/rotation [P0]
+   Done when no plaintext DB URL exists in app metadata, old password fails, and
+   least-privilege access/activity review is documented.
+
+2. Canonical domain and CORS [P0]
+   Done when Playwright verifies login, CSRF, APIs, upload and logout from the chosen
+   canonical hostname; alternate hostname returns a permanent redirect.
+
+3. Quiz deadline integrity [P0]
+   Done when API rejects or auto-submits expired attempts atomically and tests cover
+   late, duplicate and concurrent submits.
+
+4. Dependency remediation [P0]
+   Done when prod audits and image scans have no unaccepted high/critical findings.
+
+5. PostgreSQL production tier/private HA [P0/P1]
+   Done when public access is off, HA failover works, PITR restore is measured and
+   connection saturation alerts exist.
+
+6. Stateless API autoscaling [P1]
+   Done when 3 replicas run, scale-out/in preserves sessions/jobs and a killed
+   replica causes no failed critical journey.
+
+7. Distributed protection [P1]
+   Done when WAF and Redis limiter tests show consistent limits across replicas and
+   client IP handling cannot be spoofed through proxy headers.
+
+8. Queue and worker platform [P1]
+   Done when jobs are idempotent, observable, retried and dead-lettered; web requests
+   do not fan out thousands of emails or generate large PDFs inline.
+
+9. Query/pagination program [P1]
+   Done when all collection APIs cap page size, hot EXPLAIN plans use appropriate
+   indexes and performance budgets pass with production-scale synthetic data.
+
+10. Media pipeline/CDN [P2]
+    Done when uploads are quarantined/scanned, HLS variants are generated, playback
+    uses signed CDN access and 5,000-viewer egress passes startup/rebuffer gates.
+
+11. Payments [P2]
+    Done when signature/replay/idempotency/refund/reconciliation tests pass and
+    finance/legal approve invoices, retention and incident handling.
+
+12. Exam surge reliability [P2]
+    Done when 5,000 simultaneous start/autosave/submit events produce one correct
+    final result per learner with no answer leakage or expired submission bypass.
+
+13. Observability/SRE [P1/P2]
+    Done when dashboards correlate browser/API/DB/queue/media by request/release,
+    SLO burn alerts page the right owner, and runbooks are exercised.
+
+14. Frontend quality/accessibility [P2]
+    Done when lint debt is accepted or removed, critical Playwright tests run in CI,
+    WCAG 2.2 AA audit passes and mobile/low-bandwidth journeys meet budgets.
+
+======================================================================
+12. OPERATING MODEL REQUIRED FOR A HIGH-SCALE LMS
+======================================================================
+
+Daily/continuous:
+  - SLO/error-budget dashboard, queue depth, DB saturation and media health.
+  - Dependency/container scans and immutable release traceability.
+  - Payment reconciliation and failed-webhook replay.
+
+Weekly:
+  - Slow-query review, capacity trend, failed jobs, support themes and security events.
+  - Restore sample objects and verify certificate/payment/exam integrity metrics.
+
+Monthly/quarterly:
+  - Full isolated DB restore, failover/game day and vendor outage drill.
+  - Access review, secret/key rotation schedule and incident tabletop.
+  - Independent vulnerability testing after major auth/payment/media changes.
+  - Capacity rehearsal before exam or enrollment peaks.
+
+Required runbooks:
+  - Database failover/restore, bad deployment/schema migration and rollback.
+  - Payment provider outage/duplicate webhook/refund backlog.
+  - Live class degradation/fallback broadcast/teacher reconnect.
+  - CDN/storage outage, compromised content URL and takedown.
+  - Credential compromise, suspicious admin activity and student data incident.
+  - Exam submission incident with auditable recovery and learner communication.
+
+======================================================================
+13. FINAL RECOMMENDATION
+======================================================================
+
+Do not market the current deployment as capable of 5,000 concurrent students. The
+single replicas and B1ms database make that claim unsafe. First complete Phase 0,
+then build the reliable Phase 1 platform, and only approve a 5,000-user launch after
+Phase 2 workload, failover, restore and security gates pass.
+
+The most urgent operational actions are:
+  1. Secret-reference migration plus PostgreSQL credential rotation.
+  2. Canonical-domain/API/Blob CORS correction.
+  3. High-severity dependency patches.
+  4. Private HA PostgreSQL and multi-replica API.
+  5. Quiz deadline fix, distributed rate limiting and WAF.
+  6. Queue/workers and CDN media pipeline.
+  7. Real payment integration and 5,000-user exam/video/live testing.
+
+With those changes, the current codebase can become a strong production LMS. Without
+them, a traffic spike, database event, live-class surge or security incident can
+cause an outage, incorrect learner outcomes or sensitive credential exposure.
+
+======================================================================
+APPENDIX A - KEY CODE EVIDENCE
+======================================================================
+
+  backend/src/middlewares/security.middleware.ts:10-71
+    Process-local rate limiters; no shared store.
+
+  backend/src/controllers/quiz/quiz.controller.ts:499-659
+    Remaining time calculated on fetch, but submission lacks server deadline check.
+
+  backend/src/controllers/exam/exam.controller.ts:519-536
+    Good comparison: exam has server deadline enforcement and grace period.
+
+  backend/src/controllers/recordedLectures/recordedLecture.controller.ts:460-510
+    Client-submitted percentage drives lecture completion.
+
+  backend/src/controllers/certificate/certificate.controller.ts:29-59, 438-526
+    Completion dependency and unbounded in-memory progress aggregation.
+
+  backend/src/controllers/liveLecture/liveLecture.controller.ts:175-195
+    Email fan-out runs in web process.
+
+  backend/src/controllers/health.controller.ts:24-58
+    Readiness depends on LiveKit as well as DB/storage.
+
+  backend/src/services/access.service.ts
+    Central scoped authorization helpers (positive control).
+
+  backend/prisma/schema.prisma
+    Core constraints/indexes exist, but hot query indexes and active-certificate/
+    payment-state race protections need review.
+
+  frontend/src/main.tsx
+    Cookie/CSRF defaults and global 401 handling; raw Axios compatibility layer.
+
+  frontend/nginx.conf
+    TLS-edge security headers and static caching; CSP connect-src is broad.
+
+  infra/terraform/azure/main.tf
+    Stronger intended private/HA/autoscaling architecture than actual deployment.
+
+  .github/workflows/ci.yml and deploy.yml
+    Good security/build gates; production drift shows release governance needs work.
+
+======================================================================
+APPENDIX B - EVIDENCE STATUS
+======================================================================
+
+Verified fact: directly observed in source, live HTTP response, CLI or command result.
+Required test: cannot be established by static inspection and must be load/DAST/E2E.
+Recommendation: target design that must be costed, implemented and validated.
+
+End of report.

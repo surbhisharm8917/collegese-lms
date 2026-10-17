@@ -1,0 +1,63 @@
+{
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EDITOR SETTINGS
+  // ═══════════════════════════════════════════════════════════════════════════
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": false,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+  "editor.linkedEditing": true,
+  "editor.bracketPairColorization.enabled": true,
+  "editor.guides.bracketPairs": true,
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CODE ACTIONS ON SAVE
+  // ═══════════════════════════════════════════════════════════════════════════
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FILE ASSOCIATIONS
+  // ═══════════════════════════════════════════════════════════════════════════
+  "files.associations": {
+    "*.css": "tailwindcss"
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LANGUAGE-SPECIFIC FORMATTERS
+  // ═══════════════════════════════════════════════════════════════════════════
+  "[prisma]": {
+    "editor.defaultFormatter": "Prisma.prisma"
+  },
+  "[markdown]": {
+    "editor.wordWrap": "on"
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TYPESCRIPT SETTINGS
+  // ═══════════════════════════════════════════════════════════════════════════
+  "typescript.tsdk": "backend/node_modules/typescript/lib",
+  "typescript.preferences.importModuleSpecifier": "non-relative",
+  "typescript.suggest.autoImports": true,
+  "typescript.updateImportsOnFileMove.enabled": "always",
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ESLINT SETTINGS
+  // ═══════════════════════════════════════════════════════════════════════════
+  "eslint.useFlatConfig": true,
+  "eslint.validate": ["javascript", "javascriptreact", "typescript", "typescriptreact"],
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAILWIND CSS SETTINGS
+  // ═══════════════════════════════════════════════════════════════════════════
+  "tailwindCSS.experimental.classRegex": [
+    ["cva\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"],
+    ["cn\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"],
+    ["clsx\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"]
+  ],
+  "prisma.pinToPrisma6": true,
+  "typescript.autoClosingTags": false
+}

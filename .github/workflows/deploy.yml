@@ -1,0 +1,388 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Cloud target
+        required: true
+        type: choice
+        options: [azure, aws]
+      environment:
+        description: Release environment
+        required: true
+        type: choice
+        options: [staging, production]
+      confirm_production:
+        description: Type DEPLOY when environment is production
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.target }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/just_easy_ca_test?schema=public
+  JWT_SECRET: ci-only-jwt-secret-with-more-than-forty-eight-random-characters-2026
+  APP_URL: http://127.0.0.1:5173
+  API_BASE_URL: http://127.0.0.1:4000
+  CORS_ORIGINS: http://127.0.0.1:5173
+  EMAIL_HOST: smtp.example.test
+  EMAIL_PORT: "587"
+  EMAIL_USER: ci@example.test
+  EMAIL_PASS: ci-only-password
+  RESEND_API_KEY: re_ci_only_placeholder
+  RESEND_FROM_EMAIL: ci@example.test
+  STORAGE_DRIVER: local
+  LIVEKIT_API_URL: http://127.0.0.1:7880
+  LIVEKIT_WS_URL: ws://127.0.0.1:7880
+  LIVEKIT_API_KEY: jeccdevkey
+  LIVEKIT_API_SECRET: jecc-local-development-secret-2026-only
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.9-alpine
+        env:
+          POSTGRES_DB: just_easy_ca_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d just_easy_ca_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan commit for secrets
+        run: >-
+          docker run --rm
+          -v "$PWD:/repo"
+          zricethezav/gitleaks:v8.30.1 git /repo
+          --no-banner --redact --log-opts=-1 --exit-code 1
+      - name: Confirm production release
+        if: inputs.environment == 'production'
+        run: test "${{ inputs.confirm_production }}" = "DEPLOY"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            backend/pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+      - name: Install dependencies
+        run: |
+          pnpm --dir backend install --frozen-lockfile
+          pnpm --dir frontend install --frozen-lockfile
+      - name: Start LiveKit
+        run: |
+          docker compose -f compose.local.yml up -d redis livekit
+          for _ in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:7880/ >/dev/null && exit 0
+            sleep 2
+          done
+          docker compose -f compose.local.yml logs livekit redis
+          exit 1
+      - name: Verify application
+        run: |
+          pnpm --dir backend db:generate
+          pnpm --dir backend db:migrate:deploy
+          pnpm --dir backend typecheck
+          pnpm --dir frontend typecheck
+          pnpm --dir backend lint
+          pnpm --dir frontend lint
+          pnpm --dir backend test
+          pnpm --dir backend audit --prod --audit-level high
+          pnpm --dir frontend audit --prod --audit-level high
+          pnpm --dir backend build
+          pnpm --dir frontend build
+
+  images:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.names.outputs.backend }}
+      frontend: ${{ steps.names.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: names
+        name: Set immutable image names
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "backend=ghcr.io/${owner}/just-easy-ca-backend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "frontend=ghcr.io/${owner}/just-easy-ca-frontend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: ${{ steps.names.outputs.backend }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: ${{ steps.names.outputs.frontend }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+      - name: Scan production images
+        shell: bash
+        run: |
+          for image in "${{ steps.names.outputs.backend }}" "${{ steps.names.outputs.frontend }}"; do
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:0.72.0 image \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              "$image"
+          done
+      - name: Push verified images
+        shell: bash
+        run: |
+          docker push "${{ steps.names.outputs.backend }}"
+          docker push "${{ steps.names.outputs.frontend }}"
+
+  deploy_azure:
+    if: inputs.target == 'azure'
+    needs: images
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: infra/terraform/azure
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_environment: ${{ inputs.environment }}
+      TF_VAR_backend_image: ${{ needs.images.outputs.backend }}
+      TF_VAR_frontend_image: ${{ needs.images.outputs.frontend }}
+      TF_VAR_registry_username: ${{ vars.GHCR_USERNAME }}
+      TF_VAR_registry_password: ${{ secrets.GHCR_READ_TOKEN }}
+      TF_VAR_email_host: ${{ vars.EMAIL_HOST }}
+      TF_VAR_email_port: ${{ vars.EMAIL_PORT }}
+      TF_VAR_email_user: ${{ vars.EMAIL_USER }}
+      TF_VAR_email_password: ${{ secrets.EMAIL_PASSWORD }}
+      TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
+      TF_VAR_resend_from_email: ${{ vars.RESEND_FROM_EMAIL }}
+      TF_VAR_resend_from_name: ${{ vars.RESEND_FROM_NAME }}
+      TF_VAR_support_email: ${{ vars.SUPPORT_EMAIL }}
+      TF_VAR_support_phone: ${{ vars.SUPPORT_PHONE }}
+      TF_VAR_grievance_email: ${{ vars.GRIEVANCE_EMAIL }}
+      TF_VAR_livekit_api_url: ${{ vars.LIVEKIT_API_URL }}
+      TF_VAR_livekit_ws_url: ${{ vars.LIVEKIT_WS_URL }}
+      TF_VAR_livekit_api_key: ${{ secrets.LIVEKIT_API_KEY }}
+      TF_VAR_livekit_api_secret: ${{ secrets.LIVEKIT_API_SECRET }}
+      TF_VAR_company_legal_name: ${{ vars.COMPANY_LEGAL_NAME }}
+      TF_VAR_legal_address: ${{ vars.LEGAL_ADDRESS }}
+      TF_VAR_grievance_officer_name: ${{ vars.GRIEVANCE_OFFICER_NAME }}
+      TF_VAR_cin: ${{ vars.CIN }}
+      TF_VAR_gstin: ${{ vars.GSTIN }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_release: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Bootstrap encrypted Terraform state
+        shell: bash
+        run: |
+          test -n "${{ vars.AZURE_TF_STATE_RESOURCE_GROUP }}"
+          test -n "${{ vars.AZURE_TF_STATE_ACCOUNT }}"
+          az group create --name "${{ vars.AZURE_TF_STATE_RESOURCE_GROUP }}" --location "${{ vars.AZURE_LOCATION || 'centralindia' }}" --output none
+          if ! az storage account show --name "${{ vars.AZURE_TF_STATE_ACCOUNT }}" --resource-group "${{ vars.AZURE_TF_STATE_RESOURCE_GROUP }}" >/dev/null 2>&1; then
+            az storage account create --name "${{ vars.AZURE_TF_STATE_ACCOUNT }}" --resource-group "${{ vars.AZURE_TF_STATE_RESOURCE_GROUP }}" --location "${{ vars.AZURE_LOCATION || 'centralindia' }}" --sku Standard_GRS --min-tls-version TLS1_2 --allow-blob-public-access false --output none
+          fi
+          az storage container create --name tfstate --account-name "${{ vars.AZURE_TF_STATE_ACCOUNT }}" --auth-mode login --output none
+      - name: Initialize and validate Terraform
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="resource_group_name=${{ vars.AZURE_TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.AZURE_TF_STATE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=just-easy-ca/${{ inputs.environment }}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+          terraform fmt -check -recursive
+          terraform validate
+      - id: previous
+        name: Capture current release and request database backup
+        shell: bash
+        run: |
+          if resource_group=$(terraform output -raw resource_group_name 2>/dev/null); then
+            backend_name="jecc-api-${{ inputs.environment }}"
+            frontend_name="jecc-web-${{ inputs.environment }}"
+            previous_backend=$(az containerapp show --name "$backend_name" --resource-group "$resource_group" --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
+            previous_frontend=$(az containerapp show --name "$frontend_name" --resource-group "$resource_group" --query 'properties.template.containers[0].image' -o tsv 2>/dev/null || true)
+            echo "backend=$previous_backend" >> "$GITHUB_OUTPUT"
+            echo "frontend=$previous_frontend" >> "$GITHUB_OUTPUT"
+            server=$(terraform output -raw postgres_server_name 2>/dev/null || true)
+            if [ -n "$server" ]; then
+              backup="predeploy-${GITHUB_SHA::12}"
+              az postgres flexible-server backup create --resource-group "$resource_group" --name "$server" --backup-name "$backup" --output none
+            fi
+          fi
+      - id: apply
+        name: Apply Azure release
+        run: terraform apply -input=false -auto-approve
+      - id: endpoints
+        name: Read endpoints
+        shell: bash
+        run: |
+          echo "app=$(terraform output -raw frontend_url)" >> "$GITHUB_OUTPUT"
+          echo "api=$(terraform output -raw api_url)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test
+        working-directory: .
+        env:
+          APP_URL: ${{ steps.endpoints.outputs.app }}
+          API_URL: ${{ steps.endpoints.outputs.api }}
+          EXPECTED_RELEASE: ${{ github.sha }}
+        run: node scripts/smoke-test.mjs
+      - name: Roll back failed Azure release
+        if: failure() && steps.apply.outcome == 'success' && steps.previous.outputs.backend != ''
+        env:
+          TF_VAR_backend_image: ${{ steps.previous.outputs.backend }}
+          TF_VAR_frontend_image: ${{ steps.previous.outputs.frontend }}
+        run: terraform apply -input=false -auto-approve
+
+  deploy_aws:
+    if: inputs.target == 'aws'
+    needs: images
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: infra/terraform/aws
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      TF_VAR_environment: ${{ inputs.environment }}
+      TF_VAR_backend_image: ${{ needs.images.outputs.backend }}
+      TF_VAR_frontend_image: ${{ needs.images.outputs.frontend }}
+      TF_VAR_registry_username: ${{ vars.GHCR_USERNAME }}
+      TF_VAR_registry_password: ${{ secrets.GHCR_READ_TOKEN }}
+      TF_VAR_email_host: ${{ vars.EMAIL_HOST }}
+      TF_VAR_email_port: ${{ vars.EMAIL_PORT }}
+      TF_VAR_email_user: ${{ vars.EMAIL_USER }}
+      TF_VAR_email_password: ${{ secrets.EMAIL_PASSWORD }}
+      TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
+      TF_VAR_resend_from_email: ${{ vars.RESEND_FROM_EMAIL }}
+      TF_VAR_resend_from_name: ${{ vars.RESEND_FROM_NAME }}
+      TF_VAR_support_email: ${{ vars.SUPPORT_EMAIL }}
+      TF_VAR_support_phone: ${{ vars.SUPPORT_PHONE }}
+      TF_VAR_grievance_email: ${{ vars.GRIEVANCE_EMAIL }}
+      TF_VAR_livekit_api_url: ${{ vars.LIVEKIT_API_URL }}
+      TF_VAR_livekit_ws_url: ${{ vars.LIVEKIT_WS_URL }}
+      TF_VAR_livekit_api_key: ${{ secrets.LIVEKIT_API_KEY }}
+      TF_VAR_livekit_api_secret: ${{ secrets.LIVEKIT_API_SECRET }}
+      TF_VAR_company_legal_name: ${{ vars.COMPANY_LEGAL_NAME }}
+      TF_VAR_legal_address: ${{ vars.LEGAL_ADDRESS }}
+      TF_VAR_grievance_officer_name: ${{ vars.GRIEVANCE_OFFICER_NAME }}
+      TF_VAR_cin: ${{ vars.CIN }}
+      TF_VAR_gstin: ${{ vars.GSTIN }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_release: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      - name: Bootstrap encrypted Terraform state
+        shell: bash
+        run: |
+          test -n "${{ vars.AWS_TF_STATE_BUCKET }}"
+          bucket="${{ vars.AWS_TF_STATE_BUCKET }}"
+          region="${{ vars.AWS_REGION || 'ap-south-1' }}"
+          if ! aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+            if [ "$region" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$bucket" >/dev/null
+            else
+              aws s3api create-bucket --bucket "$bucket" --create-bucket-configuration "LocationConstraint=$region" >/dev/null
+            fi
+          fi
+          aws s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
+          aws s3api put-bucket-encryption --bucket "$bucket" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+          aws s3api put-public-access-block --bucket "$bucket" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+      - name: Initialize and validate Terraform
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ vars.AWS_TF_STATE_BUCKET }}" \
+            -backend-config="key=just-easy-ca/${{ inputs.environment }}.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION || 'ap-south-1' }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform fmt -check -recursive
+          terraform validate
+      - id: previous
+        name: Capture current release and create database snapshot
+        shell: bash
+        run: |
+          if cluster=$(terraform output -raw ecs_cluster 2>/dev/null); then
+            backend_task=$(aws ecs describe-services --cluster "$cluster" --services backend --query 'services[0].taskDefinition' -o text 2>/dev/null || true)
+            frontend_task=$(aws ecs describe-services --cluster "$cluster" --services frontend --query 'services[0].taskDefinition' -o text 2>/dev/null || true)
+            if [ -n "$backend_task" ] && [ "$backend_task" != "None" ]; then
+              echo "backend=$(aws ecs describe-task-definition --task-definition "$backend_task" --query 'taskDefinition.containerDefinitions[0].image' -o text)" >> "$GITHUB_OUTPUT"
+            fi
+            if [ -n "$frontend_task" ] && [ "$frontend_task" != "None" ]; then
+              echo "frontend=$(aws ecs describe-task-definition --task-definition "$frontend_task" --query 'taskDefinition.containerDefinitions[0].image' -o text)" >> "$GITHUB_OUTPUT"
+            fi
+            database=$(terraform output -raw database_identifier 2>/dev/null || true)
+            if [ -n "$database" ]; then
+              snapshot="${database}-predeploy-${GITHUB_SHA::8}"
+              aws rds create-db-snapshot --db-instance-identifier "$database" --db-snapshot-identifier "$snapshot" >/dev/null
+              aws rds wait db-snapshot-completed --db-snapshot-identifier "$snapshot"
+            fi
+          fi
+      - id: apply
+        name: Apply AWS release
+        run: terraform apply -input=false -auto-approve
+      - id: endpoints
+        name: Read endpoint
+        shell: bash
+        run: echo "app=$(terraform output -raw application_url)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test
+        working-directory: .
+        env:
+          APP_URL: ${{ steps.endpoints.outputs.app }}
+          API_URL: ${{ steps.endpoints.outputs.app }}
+          EXPECTED_RELEASE: ${{ github.sha }}
+        run: node scripts/smoke-test.mjs
+      - name: Roll back failed AWS release
+        if: failure() && steps.apply.outcome == 'success' && steps.previous.outputs.backend != ''
+        env:
+          TF_VAR_backend_image: ${{ steps.previous.outputs.backend }}
+          TF_VAR_frontend_image: ${{ steps.previous.outputs.frontend }}
+        run: terraform apply -input=false -auto-approve

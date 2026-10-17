@@ -1,0 +1,30 @@
+azure_subscription_id = "00000000-0000-0000-0000-000000000000"
+environment           = "staging"
+backend_image         = "ghcr.io/example/just-easy-ca-backend:git-sha"
+frontend_image        = "ghcr.io/example/just-easy-ca-frontend:git-sha"
+registry_username     = "github-user"
+registry_password     = "set-with-TF_VAR_registry_password"
+
+email_host     = "smtp.example.com"
+email_port     = 587
+email_user     = "notifications@example.com"
+email_password = "set-with-TF_VAR_email_password"
+
+resend_api_key    = "set-with-TF_VAR_resend_api_key"
+resend_from_email = "no-reply@justeasycaclasses.com"
+resend_from_name  = "Just Easy CA Classes"
+login_otp_enabled = true
+
+support_email   = "hello@justeasycaclasses.com"
+support_phone   = "+91 8894357155"
+grievance_email = "grievance@justeasycaclasses.com"
+
+livekit_api_url    = "https://live.example.com"
+livekit_ws_url     = "wss://live.example.com"
+livekit_api_key    = "set-with-TF_VAR_livekit_api_key"
+livekit_api_secret = "set-with-TF_VAR_livekit_api_secret"
+
+company_legal_name       = "Just Easy CA Classes Private Limited"
+legal_address            = "Required for production"
+grievance_officer_name   = "Required for production"
+alert_email              = "operations@example.com"

@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/just_easy_ca_test?schema=public
+  JWT_SECRET: ci-only-jwt-secret-with-more-than-forty-eight-random-characters-2026
+  APP_URL: http://127.0.0.1:5173
+  API_BASE_URL: http://127.0.0.1:4000
+  CORS_ORIGINS: http://127.0.0.1:5173
+  EMAIL_HOST: smtp.example.test
+  EMAIL_PORT: "587"
+  EMAIL_USER: ci@example.test
+  EMAIL_PASS: ci-only-password
+  RESEND_API_KEY: re_ci_only_placeholder
+  RESEND_FROM_EMAIL: ci@example.test
+  STORAGE_DRIVER: local
+  LIVEKIT_API_URL: http://127.0.0.1:7880
+  LIVEKIT_WS_URL: ws://127.0.0.1:7880
+  LIVEKIT_API_KEY: jeccdevkey
+  LIVEKIT_API_SECRET: jecc-local-development-secret-2026-only
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan commit for secrets
+        run: >-
+          docker run --rm
+          -v "$PWD:/repo"
+          zricethezav/gitleaks:v8.30.1 git /repo
+          --no-banner --redact --log-opts=-1 --exit-code 1
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.4
+      - name: Validate Docker Compose
+        run: docker compose -f compose.local.yml config --quiet
+      - name: Validate shell scripts
+        run: shellcheck scripts/backup-postgres.sh scripts/restore-postgres.sh scripts/sync-storage.sh frontend/docker-entrypoint.sh backend/docker-entrypoint.sh
+      - name: Validate Azure Terraform
+        run: |
+          terraform -chdir=infra/terraform/azure init -backend=false -input=false
+          terraform -chdir=infra/terraform/azure fmt -check -recursive
+          terraform -chdir=infra/terraform/azure validate
+      - name: Validate AWS Terraform
+        run: |
+          terraform -chdir=infra/terraform/aws init -backend=false -input=false
+          terraform -chdir=infra/terraform/aws fmt -check -recursive
+          terraform -chdir=infra/terraform/aws validate
+
+  application:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.9-alpine
+        env:
+          POSTGRES_DB: just_easy_ca_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d just_easy_ca_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            backend/pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          pnpm --dir backend install --frozen-lockfile
+          pnpm --dir frontend install --frozen-lockfile
+
+      - name: Start LiveKit test infrastructure
+        run: |
+          docker compose -f compose.local.yml up -d redis livekit
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:7880/ >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f compose.local.yml logs livekit redis
+          exit 1
+
+      - name: Apply database migrations
+        run: |
+          pnpm --dir backend db:generate
+          pnpm --dir backend db:migrate:deploy
+
+      - name: Typecheck
+        run: |
+          pnpm --dir backend typecheck
+          pnpm --dir frontend typecheck
+
+      - name: Lint
+        run: |
+          pnpm --dir backend lint
+          pnpm --dir frontend lint
+
+      - name: Test
+        run: pnpm --dir backend test
+
+      - name: Audit production dependencies
+        run: |
+          pnpm --dir backend audit --prod --audit-level high
+          pnpm --dir frontend audit --prod --audit-level high
+
+      - name: Build applications
+        run: |
+          pnpm --dir backend build
+          pnpm --dir frontend build
+
+      - name: LiveKit diagnostics on failure
+        if: failure()
+        run: docker compose -f compose.local.yml logs --tail=200 livekit redis
+
+  containers:
+    needs: application
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.component }}
+          push: false
+          load: true
+          tags: just-easy-ca-${{ matrix.component }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+      - name: Scan production image
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.72.0 image
+          --scanners vuln
+          --severity HIGH,CRITICAL
+          --ignore-unfixed
+          --exit-code 1
+          just-easy-ca-${{ matrix.component }}:${{ github.sha }}
